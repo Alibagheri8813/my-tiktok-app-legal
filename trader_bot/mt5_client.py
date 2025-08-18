@@ -40,9 +40,8 @@ def initialize_mt5(login: Optional[int] = None,
 					 password: Optional[str] = None,
 					 server: Optional[str] = None,
 					 path: Optional[str] = None) -> bool:
-	if not mt5.initialize(path=path):
-		logging.error(f"MT5 initialize failed: {mt5.last_error()}")
-		return False
+	if not mt5.initialize():
+		raise RuntimeError("Could not initialize MT5")
 	if login and password and server:
 		authorized = mt5.login(login=login, password=password, server=server)
 		if not authorized:
