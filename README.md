@@ -1,1 +1,0 @@
-# my-tiktok-app-legal
