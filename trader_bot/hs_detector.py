@@ -54,7 +54,7 @@ class DetectorConfig:
 	pivot_lookback: int = 5
 	shoulder_tolerance_ratio: float = 0.12  # 12% tolerance between shoulders
 	min_bars_between_pivots: int = 3
-	lookback_bars: int = 600
+	lookback_bars: int = 100
 	min_head_to_shoulder_ratio: float = 1.03  # head must be at least 3% higher/lower than shoulders
 	atr_period: int = 14
 	use_measured_move_target: bool = True

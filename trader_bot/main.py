@@ -35,9 +35,39 @@ class StoredPattern:
 
 
 class PatternStore:
-	def __init__(self):
+	def __init__(self, max_bars_keep: int = 100):
 		self._lock = threading.Lock()
 		self._data: Dict[str, StoredPattern] = {}
+		self._max_bars_keep = max(1, int(max_bars_keep))
+
+	def _timeframe_minutes(self, tf_name: str) -> int:
+		mapping = {
+			"M1": 1,
+			"M5": 5,
+			"M15": 15,
+			"M30": 30,
+			"H1": 60,
+			"H4": 240,
+			"D1": 1440,
+		}
+		return mapping.get(tf_name, 60)
+
+	def _prune_old_locked(self) -> None:
+		now = pd.Timestamp.utcnow()
+		to_delete = []
+		for pattern_id, sp in self._data.items():
+			p = sp.pattern
+			minutes = self._timeframe_minutes(p.timeframe_name)
+			window = pd.Timedelta(minutes=self._max_bars_keep * minutes)
+			cutoff = now - window
+			try:
+				detected = p.detected_at_ts
+			except Exception:
+				detected = None
+			if detected is None or detected < cutoff:
+				to_delete.append(pattern_id)
+		for k in to_delete:
+			self._data.pop(k, None)
 
 	def upsert(self, p: HeadShouldersPattern):
 		with self._lock:
@@ -52,6 +82,8 @@ class PatternStore:
 				sp.pattern.take_profit = p.take_profit
 			else:
 				self._data[key] = StoredPattern(pattern=p)
+			# Prune stale patterns outside the recent window per timeframe
+			self._prune_old_locked()
 
 	def mark_traded(self, pattern_id: str, order_ticket: Optional[int]):
 		with self._lock:
@@ -61,6 +93,8 @@ class PatternStore:
 
 	def rows(self) -> List[Dict[str, str]]:
 		with self._lock:
+			# Ensure stale entries are removed before producing rows
+			self._prune_old_locked()
 			out = []
 			for sp in self._data.values():
 				p = sp.pattern
@@ -137,7 +171,7 @@ class ScannerThread(threading.Thread):
 			return
 
 		def _worker(symbol: str, tf: int, latest_ts: Optional[pd.Timestamp]):
-			df = fetch_rates(symbol, tf, num_bars=max(800, self._cfg.lookback_bars + 50))
+			df = fetch_rates(symbol, tf, num_bars=self._cfg.lookback_bars + 50)
 			if df is None or len(df) == 0:
 				return symbol, tf, latest_ts, []
 			patterns = detect_head_shoulders(df, symbol, timeframe_to_str(tf), self._cfg)
@@ -211,7 +245,7 @@ def main():
 		return
 
 	detector_cfg = DetectorConfig()
-	store = PatternStore()
+	store = PatternStore(max_bars_keep=detector_cfg.lookback_bars)
 
 	root = tk.Tk()
 	trading_enabled_flag = {"value": True}
