@@ -59,6 +59,11 @@ class DetectorConfig:
 	atr_period: int = 14
 	use_measured_move_target: bool = True
 	risk_reward_ratio: float = 2.0
+	# Only consider breakouts that occurred within the most recent N bars of the data window
+	# This ensures we do not trade on stale historical signals
+	trade_recent_n_bars: int = 3
+	# Only place trades when the expected reward/risk is at least this threshold
+	min_trade_rr: float = 1.2
 
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -155,7 +160,9 @@ def detect_head_shoulders(df: pd.DataFrame, symbol: str, timeframe_name: str, cf
 		entry = None
 		sl = None
 		tp = None
-		for k in range(rh + 1, last_idx + 1):
+		# Accept breakouts only if they occur within the most recent window
+		min_break_k = max(rh + 1, last_idx - max(0, int(cfg.trade_recent_n_bars)) + 1)
+		for k in range(min_break_k, last_idx + 1):
 			# Linearly interpolate neckline level at k
 			y1 = low[neck_a]
 			y2 = low[neck_b]
@@ -177,6 +184,17 @@ def detect_head_shoulders(df: pd.DataFrame, symbol: str, timeframe_name: str, cf
 				else:
 					risk = abs(entry - sl)
 					tp = entry - risk * cfg.risk_reward_ratio
+				# Enforce minimum RR if SL/TP available
+				risk = abs(entry - sl) if sl is not None else float('nan')
+				reward = abs(entry - tp) if tp is not None else float('nan')
+				if not (risk > 0 and reward > 0 and (reward / risk) >= cfg.min_trade_rr):
+					# Ignore this breakout; keep scanning
+					is_break = False
+					break_ts = None
+					entry = None
+					sl = None
+					tp = None
+					continue
 				break
 		if True:
 			pattern = HeadShouldersPattern(
@@ -243,7 +261,8 @@ def detect_head_shoulders(df: pd.DataFrame, symbol: str, timeframe_name: str, cf
 		entry = None
 		sl = None
 		tp = None
-		for k in range(rs + 1, last_idx + 1):
+		min_break_k = max(rs + 1, last_idx - max(0, int(cfg.trade_recent_n_bars)) + 1)
+		for k in range(min_break_k, last_idx + 1):
 			y1 = high[neck_a]
 			y2 = high[neck_b]
 			x1 = neck_a
@@ -263,6 +282,16 @@ def detect_head_shoulders(df: pd.DataFrame, symbol: str, timeframe_name: str, cf
 				else:
 					risk = abs(entry - sl)
 					tp = entry + risk * cfg.risk_reward_ratio
+				# Enforce minimum RR if SL/TP available
+				risk = abs(entry - sl) if sl is not None else float('nan')
+				reward = abs(tp - entry) if tp is not None else float('nan')
+				if not (risk > 0 and reward > 0 and (reward / risk) >= cfg.min_trade_rr):
+					is_break = False
+					break_ts = None
+					entry = None
+					sl = None
+					tp = None
+					continue
 				break
 		pattern = HeadShouldersPattern(
 			symbol=symbol,

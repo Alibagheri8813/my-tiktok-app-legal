@@ -4,7 +4,8 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import MetaTrader5 as mt5
 import pandas as pd
@@ -12,7 +13,7 @@ import tkinter as tk
 
 from mt5_client import (
 	initialize_mt5, shutdown_mt5, fetch_rates, timeframe_to_str,
-	compute_volume_for_risk, place_market_order, format_price
+	compute_volume_for_risk, place_market_order, format_price, get_last_bar_time
 )
 from hs_detector import DetectorConfig, detect_head_shoulders, HeadShouldersPattern
 from ui_panel import PatternTableUI
@@ -105,6 +106,8 @@ class ScannerThread(threading.Thread):
 		self._interval = scan_interval_sec
 		self._stop_event = threading.Event()
 		self._enable_trading_getter = enable_trading_getter
+		self._last_bar_ts: Dict[str, Optional[pd.Timestamp]] = {}
+		self._max_workers = min(8, max(2, len(self._symbols) * len(self._timeframes)))
 
 	def stop(self):
 		self._stop_event.set()
@@ -118,12 +121,37 @@ class ScannerThread(threading.Thread):
 			time.sleep(self._interval)
 
 	def _scan_once(self):
-		for symbol in self._symbols:
-			for tf in self._timeframes:
-				df = fetch_rates(symbol, tf, num_bars=max(800, self._cfg.lookback_bars + 50))
-				if df is None or len(df) == 0:
+		# Determine which charts need scanning based on last bar time
+		pairs: List[Tuple[str, int]] = [(s, tf) for s in self._symbols for tf in self._timeframes]
+		to_scan: List[Tuple[str, int, Optional[pd.Timestamp]]] = []
+		for s, tf in pairs:
+			key = f"{s}:{tf}"
+			try:
+				latest = get_last_bar_time(s, tf)
+			except Exception:
+				latest = None
+			prev = self._last_bar_ts.get(key)
+			if latest is None or prev is None or latest != prev:
+				to_scan.append((s, tf, latest))
+		if not to_scan:
+			return
+
+		def _worker(symbol: str, tf: int, latest_ts: Optional[pd.Timestamp]):
+			df = fetch_rates(symbol, tf, num_bars=max(800, self._cfg.lookback_bars + 50))
+			if df is None or len(df) == 0:
+				return symbol, tf, latest_ts, []
+			patterns = detect_head_shoulders(df, symbol, timeframe_to_str(tf), self._cfg)
+			return symbol, tf, latest_ts, patterns
+
+		with ThreadPoolExecutor(max_workers=self._max_workers) as ex:
+			futs = [ex.submit(_worker, s, tf, ts) for (s, tf, ts) in to_scan]
+			for fut in as_completed(futs):
+				try:
+					symbol, tf, latest_ts, patterns = fut.result()
+				except Exception as e:
+					logging.exception(f"Worker failed: {e}")
 					continue
-				patterns = detect_head_shoulders(df, symbol, timeframe_to_str(tf), self._cfg)
+				self._last_bar_ts[f"{symbol}:{tf}"] = latest_ts
 				for p in patterns:
 					self._store.upsert(p)
 					if p.is_breakout and self._enable_trading_getter():
@@ -150,6 +178,9 @@ class ScannerThread(threading.Thread):
 		if volume <= 0:
 			logging.info(f"Zero volume computed for {p.symbol} {p.id}")
 			return
+		# Sanitize price precision for SL/TP
+		sl = format_price(p.symbol, sl) if sl else sl
+		tp = format_price(p.symbol, tp) if tp else tp
 		res = place_market_order(
 			symbol=p.symbol,
 			is_buy=is_buy,
