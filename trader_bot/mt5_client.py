@@ -3,6 +3,7 @@ import math
 import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
+from functools import lru_cache
 
 import MetaTrader5 as mt5
 import pandas as pd
@@ -60,6 +61,7 @@ def shutdown_mt5() -> None:
 		pass
 
 
+@lru_cache(maxsize=256)
 def resolve_symbol_name(candidate: str) -> Optional[str]:
 	"""Resolve a broker-specific symbol name (e.g., EURUSD.a) from a canonical symbol (e.g., EURUSD).
 
@@ -96,6 +98,9 @@ def resolve_symbol_name(candidate: str) -> Optional[str]:
 	return best.name
 
 
+_ENSURED_SYMBOLS = set()
+
+
 def ensure_symbol(symbol: str) -> bool:
 	resolved = resolve_symbol_name(symbol)
 	if resolved is None:
@@ -105,10 +110,15 @@ def ensure_symbol(symbol: str) -> bool:
 	if info is None:
 		logging.error(f"Symbol not found: {symbol}")
 		return False
-	if not info.visible:
-		if not mt5.symbol_select(resolved, True):
-			logging.error(f"Failed to select symbol: {resolved}")
-			return False
+	if info.visible:
+		_ENSURED_SYMBOLS.add(resolved)
+		return True
+	if resolved in _ENSURED_SYMBOLS:
+		return True
+	if not mt5.symbol_select(resolved, True):
+		logging.error(f"Failed to select symbol: {resolved}")
+		return False
+	_ENSURED_SYMBOLS.add(resolved)
 	return True
 
 
@@ -235,3 +245,23 @@ def format_price(symbol: str, price: float) -> float:
 		return round(price, 5)
 	digits = info.digits
 	return round(price, digits)
+
+
+def get_last_bar_time(symbol: str, timeframe: int) -> Optional[pd.Timestamp]:
+	"""Returns the last bar's timestamp for a symbol/timeframe or None if unavailable."""
+	resolved = resolve_symbol_name(symbol)
+	if resolved is None:
+		return None
+	if not ensure_symbol(resolved):
+		return None
+	rates = mt5.copy_rates_from_pos(resolved, timeframe, 0, 1)
+	if rates is None or len(rates) == 0:
+		return None
+	try:
+		last_ts = int(rates[0]['time'])
+	except Exception:
+		try:
+			last_ts = int(rates[0]["time"])  # dict-like
+		except Exception:
+			return None
+	return pd.to_datetime(last_ts, unit='s')
