@@ -60,22 +60,66 @@ def shutdown_mt5() -> None:
 		pass
 
 
+def resolve_symbol_name(candidate: str) -> Optional[str]:
+	"""Resolve a broker-specific symbol name (e.g., EURUSD.a) from a canonical symbol (e.g., EURUSD).
+
+	Returns the exact tradable symbol name if found; otherwise None.
+	"""
+	info = mt5.symbol_info(candidate)
+	if info is not None:
+		return candidate
+	try:
+		pref_matches = mt5.symbols_get(f"{candidate}*") or []
+	except Exception:
+		pref_matches = []
+	try:
+		any_matches = mt5.symbols_get(f"*{candidate}*") or []
+	except Exception:
+		any_matches = []
+	seen = set()
+	merged = []
+	for s in list(pref_matches) + list(any_matches):
+		if s.name not in seen:
+			merged.append(s)
+			seen.add(s.name)
+	if not merged:
+		return None
+	def sort_key(s):
+		trade_mode = getattr(s, 'trade_mode', None)
+		is_tradable = 1 if (trade_mode is not None and trade_mode != mt5.SYMBOL_TRADE_MODE_DISABLED) else 0
+		is_visible = 1 if getattr(s, 'visible', False) else 0
+		starts_with = 1 if s.name.upper().startswith(candidate.upper()) else 0
+		return (-is_tradable, -is_visible, -starts_with, len(s.name))
+	best = sorted(merged, key=sort_key)[0]
+	if best and best.name.upper() != candidate.upper():
+		logging.info(f"Resolved symbol alias: {candidate} -> {best.name}")
+	return best.name
+
+
 def ensure_symbol(symbol: str) -> bool:
-	info = mt5.symbol_info(symbol)
+	resolved = resolve_symbol_name(symbol)
+	if resolved is None:
+		logging.error(f"Symbol not found: {symbol}")
+		return False
+	info = mt5.symbol_info(resolved)
 	if info is None:
 		logging.error(f"Symbol not found: {symbol}")
 		return False
 	if not info.visible:
-		if not mt5.symbol_select(symbol, True):
-			logging.error(f"Failed to select symbol: {symbol}")
+		if not mt5.symbol_select(resolved, True):
+			logging.error(f"Failed to select symbol: {resolved}")
 			return False
 	return True
 
 
 def fetch_rates(symbol: str, timeframe: int, num_bars: int = 1000) -> Optional[pd.DataFrame]:
-	if not ensure_symbol(symbol):
+	resolved = resolve_symbol_name(symbol)
+	if resolved is None:
+		logging.error(f"Symbol not found: {symbol}")
 		return None
-	rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, num_bars)
+	if not ensure_symbol(resolved):
+		return None
+	rates = mt5.copy_rates_from_pos(resolved, timeframe, 0, num_bars)
 	if rates is None or len(rates) == 0:
 		logging.warning(f"No rates for {symbol} {timeframe_to_str(timeframe)}")
 		return None
@@ -85,7 +129,8 @@ def fetch_rates(symbol: str, timeframe: int, num_bars: int = 1000) -> Optional[p
 
 
 def _round_volume(symbol: str, volume: float) -> float:
-	info = mt5.symbol_info(symbol)
+	resolved = resolve_symbol_name(symbol) or symbol
+	info = mt5.symbol_info(resolved)
 	step = info.volume_step if info else 0.01
 	min_lot = info.volume_min if info else 0.01
 	max_lot = info.volume_max if info else 100.0
@@ -97,7 +142,8 @@ def _round_volume(symbol: str, volume: float) -> float:
 
 
 def compute_volume_for_risk(symbol: str, risk_amount: float, entry_price: float, stop_loss_price: float) -> float:
-	info = mt5.symbol_info(symbol)
+	resolved = resolve_symbol_name(symbol)
+	info = mt5.symbol_info(resolved) if resolved else None
 	if info is None:
 		return 0.0
 	point = info.point
@@ -113,7 +159,8 @@ def compute_volume_for_risk(symbol: str, risk_amount: float, entry_price: float,
 
 
 def current_price(symbol: str) -> Optional[Tuple[float, float]]:
-	tick = mt5.symbol_info_tick(symbol)
+	resolved = resolve_symbol_name(symbol)
+	tick = mt5.symbol_info_tick(resolved) if resolved else None
 	if tick is None:
 		return None
 	return tick.bid, tick.ask
@@ -129,9 +176,12 @@ def place_market_order(symbol: str,
 						 comment: str = "HS Bot") -> OrderResult:
 	if volume <= 0:
 		return OrderResult(retcode=-1, order=None, deal=None, price=None, comment="Invalid volume", request={}, response_raw=None)
-	if not ensure_symbol(symbol):
+	resolved = resolve_symbol_name(symbol)
+	if resolved is None:
 		return OrderResult(retcode=-2, order=None, deal=None, price=None, comment="Symbol not available", request={}, response_raw=None)
-	prices = current_price(symbol)
+	if not ensure_symbol(resolved):
+		return OrderResult(retcode=-2, order=None, deal=None, price=None, comment="Symbol not available", request={}, response_raw=None)
+	prices = current_price(resolved)
 	if prices is None:
 		return OrderResult(retcode=-3, order=None, deal=None, price=None, comment="No tick price", request={}, response_raw=None)
 	bid, ask = prices
@@ -146,12 +196,12 @@ def place_market_order(symbol: str,
 		sl_sane = 0.0
 	# Choose filling type based on symbol settings when available
 	fill_type = mt5.ORDER_FILLING_IOC
-	info = mt5.symbol_info(symbol)
-	if info and info.fill_mode in (mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN):
-		fill_type = info.fill_mode
+	info = mt5.symbol_info(resolved)
+	if info and getattr(info, 'filling_mode', None) in (mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN):
+		fill_type = info.filling_mode
 	request = {
 		"action": mt5.TRADE_ACTION_DEAL,
-		"symbol": symbol,
+		"symbol": resolved,
 		"volume": volume,
 		"type": order_type,
 		"price": price,
@@ -179,7 +229,8 @@ def place_market_order(symbol: str,
 
 
 def format_price(symbol: str, price: float) -> float:
-	info = mt5.symbol_info(symbol)
+	resolved = resolve_symbol_name(symbol) or symbol
+	info = mt5.symbol_info(resolved)
 	if info is None:
 		return round(price, 5)
 	digits = info.digits
