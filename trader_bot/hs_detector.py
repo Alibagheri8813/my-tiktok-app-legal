@@ -14,6 +14,9 @@ class HeadShouldersPattern:
 	left_idx: int
 	head_idx: int
 	right_idx: int
+	left_ts: pd.Timestamp
+	head_ts: pd.Timestamp
+	right_ts: pd.Timestamp
 	low1_idx: int
 	low2_idx: int
 	left_price: float
@@ -183,6 +186,9 @@ def detect_head_shoulders(df: pd.DataFrame, symbol: str, timeframe_name: str, cf
 				left_idx=lh,
 				head_idx=hd,
 				right_idx=rh,
+				left_ts=times.iloc[lh],
+				head_ts=times.iloc[hd],
+				right_ts=times.iloc[rh],
 				low1_idx=low1,
 				low2_idx=low2,
 				left_price=high[lh],
@@ -265,6 +271,9 @@ def detect_head_shoulders(df: pd.DataFrame, symbol: str, timeframe_name: str, cf
 			left_idx=ls,
 			head_idx=hd,
 			right_idx=rs,
+			left_ts=times.iloc[ls],
+			head_ts=times.iloc[hd],
+			right_ts=times.iloc[rs],
 			low1_idx=peak1,
 			low2_idx=peak2,
 			left_price=low[ls],

@@ -66,14 +66,22 @@ class PatternStore:
 				status = "BREAKOUT" if p.is_breakout else "DETECTED"
 				if sp.traded:
 					status += ", TRADED"
+				def _short(ts):
+					try:
+						return ts.strftime('%y-%m-%d %H:%M') if ts is not None else ""
+					except Exception:
+						return str(ts) if ts is not None else ""
 				out.append({
 					"id": p.id,
 					"symbol": p.symbol,
 					"timeframe": p.timeframe_name,
 					"type": p.pattern_type,
 					"status": status,
-					"detected_at": str(p.detected_at_ts),
-					"breakout_at": str(p.breakout_ts) if p.breakout_ts else "",
+					"detected_at": _short(p.detected_at_ts),
+					"breakout_at": _short(p.breakout_ts),
+					"left_at": _short(p.left_ts),
+					"head_at": _short(p.head_ts),
+					"right_at": _short(p.right_ts),
 					"entry": f"{p.entry_price:.5f}" if p.entry_price else "",
 					"neckline_a": f"{p.neckline_a_price:.5f}",
 					"neckline_b": f"{p.neckline_b_price:.5f}",
